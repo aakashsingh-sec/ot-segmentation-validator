@@ -1,188 +1,135 @@
 # OT Network Segmentation Validator
 
-A small, offline tool that checks whether an OT (operational technology)
-network's actual traffic respects its documented zone-and-conduit
-segmentation, per the Purdue Enterprise Reference Architecture and the
-IEC 62443-3-3 / 62443-3-2 zone-and-conduit model.
+An offline Streamlit tool that validates OT/ICS network segmentation against the Purdue Model and IEC 62443 zone/conduit architecture — without ever touching live devices.
 
-You give it an asset inventory (name, type, Purdue level, zone, criticality)
-and a flow export (who talked to whom, on what port/protocol). It tells you
-which flows cross a zone boundary with no documented conduit authorizing
-that exact protocol/port/direction, which devices aren't in inventory at
-all, which assets disagree with their own zone's canonical Purdue level,
-and a few other segmentation-hygiene problems — each with a severity, a
-remediation note, and a citation back to the specific IEC 62443
-requirement and MITRE ATT&CK for ICS technique it relates to.
+Built from real airport OT experience. Ingest-only: you import an asset inventory and conduit map; the tool never scans, never connects.
 
-## What this tool is not
+## What It Does
 
-- It does not scan, probe, or otherwise touch any device or network. It
-  only reads files you give it (a CSV/JSON inventory export, a CSV/JSON
-  flow export) and a local SQLite database.
-- It ships with **synthetic demo data only**. Every asset name, IP-shaped
-  string, and flow in `seed_demo.py` is fabricated for this project — none
-  of it describes a real network.
-- It is not a substitute for a real segmentation assessment, a penetration
-  test, or a 62443 conformance audit. Treat its findings as a starting
-  point for an analyst to investigate, not a verdict.
+- **Purdue Model validation** — flags assets placed at the wrong level or bypassing required zone boundaries
+- **IEC 62443 zone/conduit rules** — 10-rule engine covering DMZ bypass, level skip, insecure cross-zone protocols, shadow assets, and more
+- **Exposure Rating** — computes per-asset reachability (Exposed / Indirect / Isolated) using graph traversal from the Enterprise/DMZ boundary
+- **Drift detection** — compare two assessment snapshots to surface resolved violations and newly introduced ones
+- **P3 pipeline export** — writes `data/exposure_export.csv` consumed by the [Vulnerability Prioritization Dashboard (P3)](https://github.com/aakashsingh-sec/vulnerability-prioritization-dashboard) to weight CVE risk by zone topology
 
-## How it thinks about a network
+## Demo Network
 
-- **Purdue levels** (0 through 4, plus 3.5 for the IT/OT DMZ) describe how
-  far a device sits from the process floor. A pseudo-level 5 ("External")
-  covers anything outside the operator's own network — the internet, a
-  vendor's remote-access endpoint — so that even a flow leaving the estate
-  entirely resolves to a zone and a level instead of falling through every
-  rule silently.
-- **Zones** group assets that share a trust boundary (`Z-FIELD`,
-  `Z-CONTROL`, `Z-SAFETY`, `Z-SUPERVISORY`, `Z-OPERATIONS`, `Z-DMZ`,
-  `Z-ENTERPRISE`, plus site-specific zones like `Z-PHYSEC`/`Z-BMS` and the
-  external pseudo-zone `Z-EXTERNAL`). Each zone has one canonical Purdue
-  level.
-- **Conduits** are the organization's explicit, documented, accepted-risk
-  authorization for traffic between two zones — one exact combination of
-  zone pair, protocol, port, and direction. A conduit is a *decision*, not
-  an absence of risk: once it exists, the rules whose job is "does this
-  crossing carry *unaddressed* risk" stop firing on flows it covers.
+35-asset synthetic airport/fuel-farm network seeded on first run — no setup required. Covers:
 
-## The rule engine
+- Enterprise (Level 4): ERP, AD, email servers
+- DMZ (Level 3.5): historian, jump server, patch server
+- Supervisory (Level 2): SCADA servers, HMIs, OPC server, DCS
+- Operations (Level 3): engineering workstation, process historian, asset management
+- Control (Level 1): PLCs, RTUs, lighting controller
+- Field (Level 0): sensors, actuators, flow meters
+- Safety (SIS): safety controllers and logic solvers
+- Supporting: BMS, CCTV, external vendor connections
 
-`rules.py` evaluates every flow in an assessment against the table below.
-A flow can trip several rules at once; the highest-severity one becomes
-the headline finding and the rest are recorded as `contributing_rules` so
-nothing is silently dropped. `INCOMPLETE_INVENTORY` is the one exception —
-if either endpoint is missing a zone or Purdue level, that is the *only*
-finding for that flow, because nothing else can be evaluated without that
-information.
+## Tabs
 
-| Rule | What it catches | Base severity | IEC 62443 ref | ATT&CK for ICS |
-|---|---|---|---|---|
-| `INCOMPLETE_INVENTORY` | Endpoint known but missing zone/Purdue level | High | FR5 — SR 5.1 | — |
-| `DMZ_BYPASS` | IT/OT boundary crossed directly, skipping the Level 3.5 DMZ | High | FR5 — SR 5.1/5.2 | External Remote Services (T0822) |
-| `NO_CONDUIT` | Cross-zone flow with no conduit authorizing that protocol/port/direction | High | FR5 — SR 5.1 | — |
-| `OT_INTERNET_ROUTE` | OT asset (Level 0–3) with a flow reaching Level 5 (internet/external) | High | FR5 — SR 5.2; FR4 — SR 4.1 | Internet Accessible Device (T0883) |
-| `DUAL_HOMED_BRIDGE` | An asset relays traffic between two zones that have no conduit of their own | High | FR5 — SR 5.1/5.2 | Remote Services (T0886) |
-| `LEVEL_SKIP` | A flow spans more than one Purdue tier with no covering conduit | High | FR5 — SR 5.1 | — |
-| `SHADOW_ASSET` | Flow endpoint isn't in inventory and isn't external-shaped — an undocumented device | High | FR5 — SR 5.2 | Rogue Master (T0848) |
-| `INSECURE_PROTO_CROSS_ZONE` | An unauthenticated OT protocol (Modbus, S7comm, plain DNP3, …) crosses a zone with no covering conduit | Medium | FR1 — SR 1.1/1.2; FR3 — SR 3.1; FR4 — SR 4.1 | Adversary-in-the-Middle (T0830) |
-| `PROTO_PORT_MISMATCH` | Declared protocol doesn't match the port it was observed on | Medium | FR5 — SR 5.2 | Commonly Used Port (T0885) |
-| `ZONE_LEVEL_MISMATCH` | Asset's declared Purdue level disagrees with its declared zone's canonical level | Medium | IEC 62443-2-1 | — |
+| Tab | Purpose |
+|-----|---------|
+| Import | Load asset inventory + conduit map CSV, or seed the demo network |
+| Topology | Interactive networkx graph, colored by zone, exposure rating overlay |
+| Violations | Rule engine output with IEC 62443 SR references and MITRE ATT&CK for ICS technique IDs |
+| Compare Assessments | Drift detection between two saved snapshots |
+| Asset Inventory | Full asset table with exposure ratings, Purdue level, zone assignment |
+| Conduits | Conduit/connection table with protocol and direction |
+| Rule Reference | All 10 rules with severity, IEC 62443 clause, and ATT&CK mapping |
 
-Severity escalates one band (capped at Critical) when the destination
-asset's criticality is `High` or `Safety`. Findings touching a
-`scan_sensitivity=true` asset carry an explicit "do not actively scan this"
-note, citing MITRE's Denial of Service (T0814) rationale.
+## Exposure Rating
 
-IEC 62443-3-3 clause numbers and ATT&CK for ICS technique IDs were checked
-against the standard and the live ATT&CK for ICS matrix as of June 2026
-(see `config.py`'s header comment) — re-verify both before relying on this
-mapping in a real assessment, in case either has been revised since.
+Computed via graph traversal from the Enterprise/DMZ boundary (reachability hops):
+
+| Rating | Definition |
+|--------|-----------|
+| **Exposed** | 0–1 hops from Enterprise/DMZ — direct internet-facing or single-hop reachable |
+| **Indirect** | 2+ hops — reachable but behind zone boundaries |
+| **Isolated** | No path exists from the boundary — air-gapped or fully segmented |
+
+Distribution in the demo network: Exposed = 7, Indirect = 21, Isolated = 7.
+
+These ratings are exported to `data/exposure_export.csv` and consumed by P3 to adjust CVE priority by zone context — same CVE scores differently depending on whether the asset is Exposed vs Isolated.
+
+## Rule Engine
+
+10 rules, each tagged with an IEC 62443 SR reference and a MITRE ATT&CK for ICS technique:
+
+| Rule | Severity | IEC 62443 | ATT&CK for ICS |
+|------|----------|-----------|----------------|
+| INCOMPLETE_INVENTORY | High | FR5 — SR 5.1 | — |
+| DMZ_BYPASS | High | FR5 — SR 5.1/5.2 | External Remote Services (T0822) |
+| NO_CONDUIT | High | FR5 — SR 5.1 | — |
+| OT_INTERNET_ROUTE | High | FR5 — SR 5.2; FR4 — SR 4.1 | Internet Accessible Device (T0883) |
+| DUAL_HOMED_BRIDGE | High | FR5 — SR 5.1/5.2 | Remote Services (T0886) |
+| LEVEL_SKIP | High | FR5 — SR 5.1 | — |
+| SHADOW_ASSET | High | FR5 — SR 5.2 | Rogue Master (T0848) |
+| INSECURE_PROTO_CROSS_ZONE | Medium | FR1 — SR 1.1/1.2; FR3 — SR 3.1; FR4 — SR 4.1 | Adversary-in-the-Middle (T0830) |
+| PROTO_PORT_MISMATCH | Medium | FR5 — SR 5.2 | Commonly Used Port (T0885) |
+| ZONE_LEVEL_MISMATCH | Medium | IEC 62443-2-1 | — |
+
+## Tech Stack
+
+- Python 3.11
+- Streamlit (UI)
+- SQLite (storage)
+- Plotly (charts)
+- networkx (topology graph + reachability)
+- pandas (tabular display/export)
 
 ## Setup
 
-Requires Python 3.11.
-
-```
-py -3.11 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
-```
-
-`.env.example` lists the two settings `.env` needs; fill them in (these are
-sensible local defaults):
-
-```
-DB_PATH=data/ot_segmentation.db
-MAX_UPLOAD_MB=5
-```
-
-Before shipping or relying on this in any real capacity, run:
-
-```
-pip-audit
-```
-
-against the pinned `requirements.txt` and review any findings.
-
-## Running it
-
-```
+```bash
+git clone https://github.com/aakashsingh-sec/ot-segmentation-validator
+cd ot-segmentation-validator
+py -3.11 -m pip install -r requirements.txt
 py -3.11 -m streamlit run app.py
 ```
 
-The sidebar has a **Load synthetic demo data** button — it loads two
-linked assessments (`Baseline – Q1` and `Re-assessment – Q2`) so you can
-see a populated topology, a violations list, and the **Compare
-Assessments** tab's drift detection without supplying your own files. The
-same data can be loaded from the command line:
+On first launch, click **Load synthetic demo data** in the sidebar to load the 35-asset airport/fuel-farm scenario (or run `py -3.11 seed_demo.py` from the command line).
 
-```
-py -3.11 seed_demo.py
-```
+## Tests
 
-To import your own data instead: go to the **Import** tab, give the
-assessment a label and time window, and upload a flow export (required)
-and, optionally, an asset inventory (CSV or JSON; column requirements are
-enforced by `loader.py` and listed in its docstring). Every row is
-validated before anything reaches the database — malformed rows are
-skipped and reported with a reason, not silently dropped.
-
-## Running the tests
-
-```
+```bash
 py -3.11 -m pytest tests/ -v
 ```
 
-## Project layout
+26 tests across the rule engine and exposure rating logic. All pass.
 
-| File | Block | Purpose |
-|---|---|---|
-| `config.py` | 1 | Purdue levels, zones, protocol reference data, IEC 62443/ATT&CK mappings, rule metadata table |
-| `db.py` | 2 | SQLite schema and all parameterized data access |
-| `loader.py` | 3 | Hostile-input-safe CSV/JSON import of assets and flows |
-| `rules.py` | 4 | The segmentation rule engine |
-| `tests/test_rules.py` | 5 | pytest coverage for the rule engine |
-| `grapher.py` | 6 | Purdue-tiered topology graph (networkx layout, Plotly render) |
-| `seed_demo.py` | 7 | Synthetic two-assessment demo dataset and loader |
-| `exporter.py` | 8 | Formula-injection-safe CSV export of violations and inventory |
-| `app.py` | 9 | Streamlit UI |
+## Project Layout
 
-## Security posture
-
-- Every SQL statement is parameterized; table/column names and PRAGMA
-  statements are hardcoded literals, never built from input or config.
-- `.env` and the database file are gitignored from the first commit and
-  never logged in full — `app.py`'s log file (`logs/app.log`, also
-  gitignored) records error summaries, not full payloads.
-- Every externally-sourced file goes through `loader.py`'s guard pipeline
-  before any of its content is trusted: a charset allowlist, a size cap, a
-  row cap, a column cap, a max field length, a JSON nesting-depth limit,
-  UTF-8-only decoding with BOM/null-byte stripping, and an outright
-  rejection of zip/gzip archives.
-- CSV exports (`exporter.py`) neutralize any cell beginning with `=`, `+`,
-  `-`, `@`, a tab, or a carriage return, so a malicious field value can't
-  execute as a formula when the file is opened in Excel/Sheets.
-- `app.py` never passes `unsafe_allow_html=True` anywhere; tables render
-  through `st.dataframe` (including pandas Styler for severity coloring),
-  and Plotly hover/labels are plain text.
-- Errors shown to the user are short, pre-written, non-sensitive messages.
-  Full exception detail (including anything that might contain a stack
-  trace or filesystem path) goes only to the gitignored log file.
-- The tool never scans, pings, or otherwise touches a device — every code
-  path either reads local files/database or writes to the local database.
-- Findings are never silenced: a flow that trips multiple rules keeps every
-  one of them (headline plus `contributing_rules`), and re-running the
-  engine replaces an assessment's prior violations rather than silently
-  merging with them.
+| File / Folder | Purpose |
+|---------------|---------|
+| `app.py` | Streamlit entry point |
+| `config.py` | Purdue levels, zones, IEC 62443/ATT&CK mappings, rule metadata |
+| `db.py` | SQLite schema and queries |
+| `loader.py` | Hostile-input-safe CSV/JSON import |
+| `rules.py` | 10-rule validation engine, including exposure rating computation (`compute_exposure_ratings`/`recompute_exposure`) |
+| `grapher.py` | Purdue-tiered topology graph (networkx layout, Plotly render) |
+| `seed_demo.py` | Seeds the 35-asset synthetic demo network |
+| `exporter.py` | Formula-injection-safe CSV export |
+| `tests/test_rules.py` | Rule engine unit tests |
+| `tests/test_exposure.py` | Exposure rating unit tests |
+| `data/ot_demo_assets.csv` | Canonical 35-asset fixture (shared with P3) |
+| `data/exposure_export.csv` | Per-asset exposure ratings exported for P3 consumption |
 
 ## Screenshots
 
-`screenshots/` is reserved for UI captures (topology view, violations
-table, compare-assessments drift) taken from a running instance — add them
-there and reference them here once you've run the app locally; none are
-checked in yet.
+**Topology tab — exposure-colored network graph**
+![Topology graph](screenshots/topology.png)
 
-## License
+**Violations tab — rule hits with IEC 62443 references**
+![Violations table](screenshots/violations.png)
 
-See `LICENSE`.
+**Asset Inventory — exposure ratings per asset**
+![Asset inventory](screenshots/asset_inventory.png)
+
+**Compare Assessments — drift between Q1 and Q2**
+![Drift detection](screenshots/compare_assessments.png)
+
+**Rule Reference tab**
+![Rule reference](screenshots/rule_reference.png)
+
+---
+
+**Author:** Aakash Singh — [github.com/aakashsingh-sec](https://github.com/aakashsingh-sec)
